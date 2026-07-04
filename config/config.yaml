@@ -1,0 +1,28 @@
+server:
+  addr: ":8080"
+  read_timeout: 10
+  write_timeout: 10
+
+mysql:
+  dsn: "root:root@tcp(127.0.0.1:3306)/tidal?charset=utf8mb4&parseTime=true&loc=Local"
+  max_open_conns: 50
+  max_idle_conns: 20
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+
+rabbitmq:
+  url: "amqp://guest:guest@127.0.0.1:5672/"
+  exchange: "tidal.settle"
+  queue: "tidal.settle.queue"
+  routing_key: "tidal.settle.routing"
+  dead_letter_queue: "tidal.settle.dead"
+
+aggregator:
+  window_ttl: 3s
+  shutdown_flush_timeout: 10s
+
+log:
+  level: "info"

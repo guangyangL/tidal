@@ -1,0 +1,79 @@
+services:
+  mysql:
+    image: mysql:8.0
+    platform: linux/amd64
+    container_name: tidal-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: tidal
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../scripts/sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - tidal-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: tidal-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - tidal-net
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: tidal-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - tidal-net
+
+  tidal-app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: tidal-app
+    ports:
+      - "8080:8080"
+    environment:
+      TIDAL_SERVER_ADDR: ":8080"
+      TIDAL_MYSQL_DSN: "root:root@tcp(tidal-mysql:3306)/tidal?charset=utf8mb4&parseTime=true&loc=Local"
+      TIDAL_REDIS_ADDR: "tidal-redis:6379"
+      TIDAL_RABBITMQ_URL: "amqp://guest:guest@tidal-rabbitmq:5672/"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - tidal-net
+
+volumes:
+  mysql_data:
+
+networks:
+  tidal-net:
+    driver: bridge
