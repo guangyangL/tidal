@@ -38,16 +38,19 @@ type RedisConfig struct {
 }
 
 type RabbitMQConfig struct {
-	URL            string `mapstructure:"url"`
-	Exchange       string `mapstructure:"exchange"`
-	Queue          string `mapstructure:"queue"`
-	RoutingKey     string `mapstructure:"routing_key"`
+	URL             string `mapstructure:"url"`
+	Exchange        string `mapstructure:"exchange"`
+	Queue           string `mapstructure:"queue"`
+	RoutingKey      string `mapstructure:"routing_key"`
 	DeadLetterQueue string `mapstructure:"dead_letter_queue"`
 }
 
 type AggregatorConfig struct {
 	WindowTTL            time.Duration `mapstructure:"window_ttl"`
+	NumShards            int           `mapstructure:"num_shards"`
 	ShutdownFlushTimeout time.Duration `mapstructure:"shutdown_flush_timeout"`
+	MaxComboCount        int32         `mapstructure:"max_combo_count"`
+	MaxWindowsPerShard   int           `mapstructure:"max_windows_per_shard"`
 }
 
 type LogConfig struct {
@@ -96,5 +99,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("redis.db", 0)
 	v.SetDefault("aggregator.window_ttl", "3s")
 	v.SetDefault("aggregator.shutdown_flush_timeout", "10s")
+	v.SetDefault("aggregator.max_combo_count", 100)
+	v.SetDefault("aggregator.max_windows_per_shard", 100000)
 	v.SetDefault("log.level", "info")
 }

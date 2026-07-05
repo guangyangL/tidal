@@ -21,6 +21,6 @@ type GiftRecord struct {
 	Status      int8       `db:"status"`
 	RetryCount  int8       `db:"retry_count"`
 	SettleTime  *time.Time `db:"settle_time"`
-	Extra       string     `db:"extra"`
+	Extra       *string    `db:"extra"`
 	CreateTime  time.Time  `db:"create_time"`
 }

@@ -23,6 +23,9 @@ rabbitmq:
 aggregator:
   window_ttl: 3s
   shutdown_flush_timeout: 10s
+  num_shards: 16
+  max_combo_count: 100
+  max_windows_per_shard: 100000
 
 log:
   level: "info"

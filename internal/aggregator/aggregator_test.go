@@ -7,7 +7,7 @@ import (
 )
 
 func TestAdd(t *testing.T) {
-	a := NewAggregator(time.Hour, 4)
+	a := NewAggregator(time.Hour, 4, 100, 1000)
 	key := ComboKey{UserID: 1, AnchorID: 1, GiftID: 1}
 
 	result, w := a.Add(key, 100)
@@ -37,7 +37,7 @@ func TestAdd(t *testing.T) {
 }
 
 func TestWindowExpiryTriggersFlush(t *testing.T) {
-	a := NewAggregator(30*time.Millisecond, 4)
+	a := NewAggregator(30*time.Millisecond, 4, 100, 1000)
 	key := ComboKey{UserID: 10, AnchorID: 5, GiftID: 2}
 
 	// open a window
@@ -69,7 +69,7 @@ func TestWindowExpiryTriggersFlush(t *testing.T) {
 }
 
 func TestConcurrentAdd(t *testing.T) {
-	a := NewAggregator(time.Hour, 8)
+	a := NewAggregator(time.Hour, 8, 100, 1000)
 
 	var wg sync.WaitGroup
 	n := 1000
@@ -99,7 +99,7 @@ func TestConcurrentAdd(t *testing.T) {
 }
 
 func TestShutdownFlushesAll(t *testing.T) {
-	a := NewAggregator(time.Hour, 4)
+	a := NewAggregator(time.Hour, 4, 100, 1000)
 	for uid := range 10 {
 		a.Add(ComboKey{UserID: int64(uid), AnchorID: 1, GiftID: 1}, 100)
 	}
@@ -116,7 +116,7 @@ func TestShutdownFlushesAll(t *testing.T) {
 }
 
 func TestFlusherWorkers(t *testing.T) {
-	a := NewAggregator(10*time.Millisecond, 4)
+	a := NewAggregator(10*time.Millisecond, 4, 100, 1000)
 
 	var mu sync.Mutex
 	var flushed []*ComboWindow

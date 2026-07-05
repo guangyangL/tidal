@@ -10,14 +10,11 @@
 -- 职责：管理用户资产，高并发扣减的核心阵地
 -- 设计意图：
 --   - version: 乐观锁，替代悲观锁应对高并发
---   - frozen_amount: 支持两阶段扣减（Redis预扣 → DB确认），
---     防止进程崩溃后资金状态不一致
 --   - wallet_type: 区分充值币/赠送币，支撑运营活动场景
 -- ----------------------------------------------------------
 CREATE TABLE `t_user_wallet` (
     `user_id`       BIGINT   NOT NULL COMMENT '用户ID',
     `balance`       BIGINT   NOT NULL DEFAULT 0 COMMENT '虚拟金币余额(单位:分，避免浮点数)',
-    `frozen_amount` BIGINT   NOT NULL DEFAULT 0 COMMENT '冻结中金额(Redis预扣未确认)，TCC二阶段用',
     `wallet_type`   TINYINT  NOT NULL DEFAULT 0 COMMENT '钱包类型: 0-充值币, 1-赠送币(不可提现)',
     `version`       INT      NOT NULL DEFAULT 0 COMMENT '乐观锁版本号，CAS更新',
     `update_time`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

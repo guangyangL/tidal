@@ -2,19 +2,39 @@ package cache
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/guangyang/tidal/internal/model"
 )
 
 type GiftCache struct {
-	rdb *redis.Client
+	rdb  *redis.Client
+	repo interface {
+		GetGiftByID(ctx context.Context, giftID int64) (*model.GiftConfig, error)
+	}
 }
 
-func NewGiftCache(rdb *redis.Client) *GiftCache {
-	return &GiftCache{rdb: rdb}
+func NewGiftCache(rdb *redis.Client, repo interface {
+	GetGiftByID(ctx context.Context, giftID int64) (*model.GiftConfig, error)
+}) *GiftCache {
+	return &GiftCache{rdb: rdb, repo: repo}
 }
 
-func (c *GiftCache) GetPrice(ctx context.Context, giftID int) (int64, error) {
-	// TODO: HGET gift:config:{gift_id} price
-	return 0, nil
+// GetPrice returns the gift price, trying Redis first then falling back to MySQL.
+func (c *GiftCache) GetPrice(ctx context.Context, giftID int64) (int64, error) {
+	if c.rdb != nil {
+		price, err := c.rdb.HGet(ctx, fmt.Sprintf("gift:config:%d", giftID), "price").Int64()
+		if err == nil {
+			return price, nil
+		}
+	}
+
+	// fallback to MySQL
+	gift, err := c.repo.GetGiftByID(ctx, giftID)
+	if err != nil {
+		return 0, err
+	}
+	return gift.Price, nil
 }

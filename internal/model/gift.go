@@ -7,6 +7,6 @@ type GiftConfig struct {
 	Name       string    `db:"name"`
 	Price      int64     `db:"price"`
 	Status     int8      `db:"status"`
-	Extra      string    `db:"extra"`
+	Extra      *string   `db:"extra"`
 	CreateTime time.Time `db:"create_time"`
 }
