@@ -22,24 +22,25 @@ if balance < tonumber(ARGV[1]) then
 	return {-2, 0}
 end
 redis.call('DECRBY', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], 3600)
 return {0, balance - tonumber(ARGV[1])}
 `)
+
+const walletKeyTTL = 3600 // seconds
+
+type WalletRepository interface {
+	GetBalance(ctx context.Context, userID int64) (int64, error)
+	GetVersion(ctx context.Context, userID int64) (int, error)
+	Deduct(ctx context.Context, userID int64, amount int64, expectedVersion int) (int, error)
+}
 
 type WalletCache struct {
 	rdb     *redis.Client
 	healthy atomic.Bool
-	repo interface {
-		GetBalance(ctx context.Context, userID int64) (int64, error)
-		GetVersion(ctx context.Context, userID int64) (int, error)
-		Deduct(ctx context.Context, userID int64, amount int64, expectedVersion int) (int, error)
-	}
+	repo    WalletRepository
 }
 
-func NewWalletCache(rdb *redis.Client, repo interface {
-	GetBalance(ctx context.Context, userID int64) (int64, error)
-	GetVersion(ctx context.Context, userID int64) (int, error)
-	Deduct(ctx context.Context, userID int64, amount int64, expectedVersion int) (int, error)
-}) *WalletCache {
+func NewWalletCache(rdb *redis.Client, repo WalletRepository) *WalletCache {
 	wc := &WalletCache{rdb: rdb, repo: repo}
 	wc.healthy.Store(true)
 	return wc
@@ -83,7 +84,7 @@ func (c *WalletCache) PreDeduct(ctx context.Context, userID int64, amount int64)
 			if err != nil {
 				return fmt.Errorf("load balance: %w", err)
 			}
-			c.rdb.Set(ctx, key, bal, 0)
+			c.rdb.Set(ctx, key, bal, walletKeyTTL)
 			continue
 		case -2:
 			return ErrInsufficientBalance
@@ -140,7 +141,7 @@ func (c *WalletCache) LoadBalance(ctx context.Context, userID int64) error {
 	if err != nil {
 		return err
 	}
-	return c.rdb.Set(ctx, walletKey(userID), bal, 0).Err()
+	return c.rdb.Set(ctx, walletKey(userID), bal, walletKeyTTL).Err()
 }
 
 func walletKey(userID int64) string {

@@ -43,13 +43,13 @@ func (h *GiftHandler) Send(c *gin.Context) {
 		return
 	}
 
-	result, err := h.svc.SendGift(c.Request.Context(), userID, req.RoomID, req.AnchorID, req.GiftID, req.ComboSeq)
+	out, err := h.svc.SendGift(c.Request.Context(), userID, req.RoomID, req.AnchorID, req.GiftID, req.ComboSeq)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, SendGiftResp{Code: 9001, Message: err.Error()})
 		return
 	}
 
-	switch result {
+	switch out.Result {
 	case service.SendOK:
 		c.JSON(http.StatusOK, SendGiftResp{Code: 0, Message: "ok"})
 	case service.SendDuplicate:
