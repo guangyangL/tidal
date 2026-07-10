@@ -7,8 +7,11 @@ import (
 	"sync"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	"github.com/guangyang/tidal/internal/event"
 	"github.com/guangyang/tidal/internal/model"
+	"github.com/guangyang/tidal/internal/mq"
 	"github.com/guangyang/tidal/internal/repository"
 	"github.com/guangyang/tidal/pkg/token"
 )
@@ -19,8 +22,6 @@ type settleGroup struct {
 	giftID     int64
 	roomID     int64
 	totalPrice int64
-	totalCount int
-	latestSeq  int64
 }
 
 type WalletBalanceSyncer interface {
@@ -47,6 +48,25 @@ func NewSettleConsumer(
 		walletCache: walletCache,
 		buffer:      make([]event.GiftSettleEvent, 0, 4096),
 	}
+}
+
+func StartSettleConsumer(
+	ch *amqp.Channel, exchange string,
+	walletRepo *repository.WalletRepo,
+	recordRepo *repository.RecordRepo,
+	walletCache WalletBalanceSyncer,
+) (*mq.Consumer, error) {
+	sc := NewSettleConsumer(walletRepo, recordRepo, walletCache)
+	consumer, err := mq.NewConsumer(ch, exchange, "tidal.settle.queue", "gift.settle", sc.Handle)
+	if err != nil {
+		return nil, err
+	}
+	if err := consumer.Start(); err != nil {
+		return nil, err
+	}
+	go sc.FlushLoop(context.Background())
+	log.Print("settle mq consumer started")
+	return consumer, nil
 }
 
 func (c *SettleConsumer) Handle(body []byte) error {
@@ -91,18 +111,14 @@ func (c *SettleConsumer) flush(ctx context.Context) {
 			}
 			groups[h] = g
 		}
-		g.totalCount += e.ComboCount
-		g.totalPrice += e.Price * int64(e.ComboCount)
-		if e.ComboSeq > g.latestSeq {
-			g.latestSeq = e.ComboSeq
-		}
+		g.totalPrice += e.Price
 	}
 
 	for _, g := range groups {
-		if g.totalCount == 0 {
+		if g.totalPrice == 0 {
 			continue
 		}
-		if err := c.deductRetry(ctx, g.userID, int(g.totalPrice)); err != nil {
+		if err := c.deductRetry(ctx, g.userID, g.totalPrice); err != nil {
 			log.Printf("settle deduct user=%d amount=%d: %v", g.userID, g.totalPrice, err)
 			continue
 		}
@@ -116,7 +132,6 @@ func (c *SettleConsumer) flush(ctx context.Context) {
 			UserID:      g.userID,
 			AnchorID:    g.anchorID,
 			GiftID:      int(g.giftID),
-			ComboCount:  g.totalCount,
 			TotalAmount: g.totalPrice,
 			Status:      model.RecordStatusDeducted,
 		}
@@ -126,13 +141,13 @@ func (c *SettleConsumer) flush(ctx context.Context) {
 	}
 }
 
-func (c *SettleConsumer) deductRetry(ctx context.Context, userID int64, amount int) error {
+func (c *SettleConsumer) deductRetry(ctx context.Context, userID int64, amount int64) error {
 	for i := range 3 {
 		version, err := c.walletRepo.GetVersion(ctx, userID)
 		if err != nil {
 			return err
 		}
-		_, err = c.walletRepo.Deduct(ctx, userID, int64(amount), version)
+		_, err = c.walletRepo.Deduct(ctx, userID, amount, version)
 		if err == nil {
 			return nil
 		}

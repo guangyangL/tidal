@@ -21,11 +21,11 @@ func NewRecordRepo(db *sqlx.DB) *RecordRepo {
 func (r *RecordRepo) Insert(ctx context.Context, record *model.GiftRecord) error {
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO t_gift_record
-		 (batch_token, room_id, user_id, anchor_id, gift_id, combo_count, total_amount, status, extra)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 (batch_token, room_id, user_id, anchor_id, gift_id, total_amount, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE id=id`,
 		record.BatchToken, record.RoomID, record.UserID, record.AnchorID,
-		record.GiftID, record.ComboCount, record.TotalAmount, record.Status, record.Extra,
+		record.GiftID, record.TotalAmount, record.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("insert record: %w", err)

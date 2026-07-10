@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"log"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/guangyang/tidal/internal/cache"
@@ -58,22 +58,24 @@ func main() {
 		}
 	}
 
-	// periodic Redis health check
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			walletCache.TryRecover(context.Background())
-		}
-	}()
-
 	// --- MQ ---
-	var mqProducer *mq.Producer
+	var (
+		mqProducer *mq.Producer
+		mqConn     *amqp.Connection
+	)
 	if cfg.RabbitMQ.URL != "" {
-		mqProducer, err = mq.NewProducer(cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
+		conn, closeFunc, err := mq.Connect(cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
 		if err != nil {
-			log.Printf("mq producer: %v", err)
+			log.Fatalf("mq connect: %v", err)
 		}
+		mqConn = conn
+		defer closeFunc()
+
+		prodCh, err := mqConn.Channel()
+		if err != nil {
+			log.Fatalf("producer channel: %v", err)
+		}
+		mqProducer = mq.NewProducer(prodCh, cfg.RabbitMQ.Exchange)
 	}
 
 	// --- segment tree ---
@@ -84,24 +86,26 @@ func main() {
 	leaderboardCounter := leaderboard.NewCounter(rdb, mqProducer)
 
 	if mqProducer != nil {
-		lbConsumer, err := leaderboard.StartConsumer(cfg.RabbitMQ.URL, rdb, segTree)
+		lbCh, err := mqConn.Channel()
 		if err != nil {
-			log.Printf("leaderboard mq consumer: %v", err)
-		}
-		_ = lbConsumer
-
-		// settlement consumer: reuses flusher logic via MQ
-		settleConsumer := service.NewSettleConsumer(walletRepo, recordRepo, walletCache)
-		settleMQ, err := mq.NewConsumer(
-			cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange,
-			"tidal.settle.queue", "gift.settle",
-			settleConsumer.Handle,
-		)
-		if err != nil {
-			log.Printf("settle mq consumer: %v", err)
+			log.Printf("leaderboard channel: %v", err)
 		} else {
-			settleMQ.Start()
-			go settleConsumer.FlushLoop(context.Background())
+			lbConsumer, err := leaderboard.StartConsumer(lbCh, rdb, segTree)
+			if err != nil {
+				log.Printf("leaderboard mq consumer: %v", err)
+			}
+			_ = lbConsumer
+		}
+
+		settleCh, err := mqConn.Channel()
+		if err != nil {
+			log.Printf("settle channel: %v", err)
+		} else {
+			settleMQ, err := service.StartSettleConsumer(settleCh, cfg.RabbitMQ.Exchange, walletRepo, recordRepo, walletCache)
+			if err != nil {
+				log.Printf("settle mq consumer: %v", err)
+			}
+			_ = settleMQ
 		}
 	}
 

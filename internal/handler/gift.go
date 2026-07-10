@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -21,7 +23,6 @@ type SendGiftReq struct {
 	RoomID   int64 `json:"room_id"   binding:"required"`
 	AnchorID int64 `json:"anchor_id" binding:"required"`
 	GiftID   int64 `json:"gift_id"   binding:"required"`
-	ComboSeq int64 `json:"combo_seq" binding:"required"`
 }
 
 type SendGiftResp struct {
@@ -43,7 +44,13 @@ func (h *GiftHandler) Send(c *gin.Context) {
 		return
 	}
 
-	out, err := h.svc.SendGift(c.Request.Context(), userID, req.RoomID, req.AnchorID, req.GiftID, req.ComboSeq)
+	reqID := c.GetHeader("X-Request-ID")
+	if reqID == "" {
+		reqID = fmt.Sprintf("%d-%d", userID, time.Now().UnixNano())
+	}
+	c.Header("X-Request-ID", reqID)
+
+	out, err := h.svc.SendGift(c.Request.Context(), reqID, userID, req.RoomID, req.AnchorID, req.GiftID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, SendGiftResp{Code: 9001, Message: err.Error()})
 		return

@@ -2,7 +2,6 @@ package mq
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -10,27 +9,12 @@ import (
 )
 
 type Producer struct {
-	conn     *amqp.Connection
 	ch       *amqp.Channel
 	exchange string
 }
 
-func NewProducer(url, exchange string) (*Producer, error) {
-	conn, err := amqp.Dial(url)
-	if err != nil {
-		return nil, fmt.Errorf("dial rabbitmq: %w", err)
-	}
-	ch, err := conn.Channel()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("channel: %w", err)
-	}
-	if err := ch.ExchangeDeclare(exchange, "direct", true, false, false, false, nil); err != nil {
-		ch.Close()
-		conn.Close()
-		return nil, fmt.Errorf("exchange declare: %w", err)
-	}
-	return &Producer{conn: conn, ch: ch, exchange: exchange}, nil
+func NewProducer(ch *amqp.Channel, exchange string) *Producer {
+	return &Producer{ch: ch, exchange: exchange}
 }
 
 func (p *Producer) Publish(ctx context.Context, routingKey string, body []byte) error {
@@ -46,9 +30,6 @@ func (p *Producer) Publish(ctx context.Context, routingKey string, body []byte) 
 func (p *Producer) Close() {
 	if p.ch != nil {
 		p.ch.Close()
-	}
-	if p.conn != nil {
-		p.conn.Close()
 	}
 	log.Print("mq producer closed")
 }

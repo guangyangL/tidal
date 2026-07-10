@@ -10,17 +10,13 @@ const (
 )
 
 type GiftRecord struct {
-	ID          int64      `db:"id"`
-	BatchToken  string     `db:"batch_token"`
-	RoomID      int64      `db:"room_id"`
-	UserID      int64      `db:"user_id"`
-	AnchorID    int64      `db:"anchor_id"`
-	GiftID      int        `db:"gift_id"`
-	ComboCount  int        `db:"combo_count"`
-	TotalAmount int64      `db:"total_amount"`
-	Status      int8       `db:"status"`
-	RetryCount  int8       `db:"retry_count"`
-	SettleTime  *time.Time `db:"settle_time"`
-	Extra       *string    `db:"extra"`
-	CreateTime  time.Time  `db:"create_time"`
+	ID          int64     `db:"id"`
+	BatchToken  string    `db:"batch_token"`
+	RoomID      int64     `db:"room_id"`
+	UserID      int64     `db:"user_id"`
+	AnchorID    int64     `db:"anchor_id"`
+	GiftID      int       `db:"gift_id"`
+	TotalAmount int64     `db:"total_amount"`
+	Status      int8      `db:"status"`
+	CreateTime  time.Time `db:"create_time"`
 }

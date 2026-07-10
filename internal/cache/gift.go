@@ -9,16 +9,16 @@ import (
 	"github.com/guangyang/tidal/internal/model"
 )
 
-type GiftCache struct {
-	rdb  *redis.Client
-	repo interface {
-		GetGiftByID(ctx context.Context, giftID int64) (*model.GiftConfig, error)
-	}
+type GiftRepository interface {
+	GetGiftByID(ctx context.Context, giftID int64) (*model.GiftConfig, error)
 }
 
-func NewGiftCache(rdb *redis.Client, repo interface {
-	GetGiftByID(ctx context.Context, giftID int64) (*model.GiftConfig, error)
-}) *GiftCache {
+type GiftCache struct {
+	rdb  *redis.Client
+	repo GiftRepository
+}
+
+func NewGiftCache(rdb *redis.Client, repo GiftRepository) *GiftCache {
 	return &GiftCache{rdb: rdb, repo: repo}
 }
 

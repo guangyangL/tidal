@@ -10,6 +10,8 @@ import (
 
 	"github.com/guangyang/tidal/internal/event"
 	"github.com/guangyang/tidal/internal/mq"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type MQConsumer struct {
@@ -36,10 +38,9 @@ func (c *MQConsumer) Handle(body []byte) error {
 	return UpdateScore(ctx, c.rdb, c.tree, msg.KeyPrefix, oldScore, msg.Score)
 }
 
-// StartConsumer creates and starts the MQ consumer for change_counter_trigger events.
-func StartConsumer(url string, rdb *redis.Client, tree *SegmentNode) (*mq.Consumer, error) {
+func StartConsumer(ch *amqp.Channel, rdb *redis.Client, tree *SegmentNode) (*mq.Consumer, error) {
 	handler := NewMQConsumer(rdb, tree)
-	consumer, err := mq.NewConsumer(url, "tidal.settle", "tidal.leaderboard", "gift.leaderboard", handler.Handle)
+	consumer, err := mq.NewConsumer(ch, "tidal.settle", "tidal.leaderboard", "gift.leaderboard", handler.Handle)
 	if err != nil {
 		return nil, err
 	}

@@ -58,9 +58,9 @@ type SendGiftOutput struct {
 	ComboCount int
 }
 
-func (s *GiftService) SendGift(ctx context.Context, userID, roomID, anchorID, giftID, comboSeq int64) (*SendGiftOutput, error) {
+func (s *GiftService) SendGift(ctx context.Context, reqID string, userID, roomID, anchorID, giftID int64) (*SendGiftOutput, error) {
 	// 1. idempotent check
-	if err := s.dedup.SETNX(ctx, comboKey(userID, comboSeq)); err != nil {
+	if err := s.dedup.SETNX(ctx, fmt.Sprintf("idempotent:%d:%s", userID, reqID)); err != nil {
 		return &SendGiftOutput{Result: SendDuplicate}, nil
 	}
 
@@ -90,13 +90,11 @@ func (s *GiftService) SendGift(ctx context.Context, userID, roomID, anchorID, gi
 
 	// 6. Publish settlement event to MQ
 	settleEvent := event.GiftSettleEvent{
-		UserID:     userID,
-		AnchorID:   anchorID,
-		GiftID:     giftID,
-		RoomID:     roomID,
-		Price:      price,
-		ComboSeq:   comboSeq,
-		ComboCount: int(comboCount),
+		UserID:   userID,
+		AnchorID: anchorID,
+		GiftID:   giftID,
+		RoomID:   roomID,
+		Price:    price,
 	}
 	body, _ := json.Marshal(settleEvent)
 	_ = s.producer.Publish(ctx, "gift.settle", body)
@@ -106,6 +104,3 @@ func (s *GiftService) SendGift(ctx context.Context, userID, roomID, anchorID, gi
 	return &SendGiftOutput{Result: SendOK, ComboCount: int(comboCount)}, nil
 }
 
-func comboKey(userID, comboSeq int64) string {
-	return fmt.Sprintf("idempotent:%d:%d", userID, comboSeq)
-}
