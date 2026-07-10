@@ -1,0 +1,25 @@
+# Binaries
+bin/
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+
+# Environment
+.env
+.env.local
+
+# Dependencies
+vendor/

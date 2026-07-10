@@ -102,9 +102,10 @@ deploy/
 ├── Dockerfile               #   多阶段构建
 └── docker-compose.yml       #   MySQL + Redis + RabbitMQ + App
 
-scripts/sql/
-├── 001_init_schema.sql      #   DDL（3 张表）
-└── 002_seed_data.sql        #   测试数据
+scripts/
+├── sql/                      #   DDL 参考 + 种子数据
+├── gen_targets.go            #   压测目标生成器
+└── loadtest.sh               #   压测脚本
 ```
 
 ---

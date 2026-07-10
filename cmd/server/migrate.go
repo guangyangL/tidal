@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -50,6 +52,7 @@ func autoMigrate(db *sqlx.DB) {
 	}
 
 	seedGiftConfig(db)
+	seedTestUsers(db)
 }
 
 func seedGiftConfig(db *sqlx.DB) {
@@ -80,4 +83,40 @@ func seedGiftConfig(db *sqlx.DB) {
 		}
 	}
 	log.Print("gift config seeded")
+}
+
+func seedTestUsers(db *sqlx.DB) {
+	const minUsers = 1000
+	const startUID = 10000
+	const initBalance = 1_000_000
+
+	var count int
+	if err := db.Get(&count, "SELECT COUNT(*) FROM t_user_wallet WHERE user_id >= ?", startUID); err != nil {
+		log.Printf("seed test users check: %v", err)
+		return
+	}
+	if count >= minUsers {
+		return
+	}
+
+	needed := minUsers - count
+	// batch insert in chunks of 500
+	chunk := 500
+	for offset := 0; offset < needed; offset += chunk {
+		end := min(offset+chunk, needed)
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO t_user_wallet (user_id, balance, wallet_type) VALUES ")
+		for i := offset; i < end; i++ {
+			if i > offset {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(&sb, "(%d, %d, 0)", startUID+int64(count+i), initBalance)
+		}
+		sb.WriteString(" ON DUPLICATE KEY UPDATE balance=VALUES(balance), version=0")
+		if _, err := db.Exec(sb.String()); err != nil {
+			log.Printf("seed test users: %v", err)
+			return
+		}
+	}
+	log.Printf("test users seeded: %d -> %d", count, count+needed)
 }

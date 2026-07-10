@@ -221,5 +221,5 @@ pkg/
 ├── idgen/                   # Sonyflake ID 生成 + base62 编码
 └── token/                   # batch_token 编码
 deploy/                      # Dockerfile + docker-compose.yml
-scripts/sql/                 # DDL + seed 数据
+scripts/                     # 压测脚本 + DDL 参考
 ```
