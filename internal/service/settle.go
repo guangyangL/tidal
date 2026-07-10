@@ -26,6 +26,7 @@ type settleGroup struct {
 
 type WalletBalanceSyncer interface {
 	LoadBalance(ctx context.Context, userID int64) error
+	SyncBalance(ctx context.Context, userID int64) error
 }
 
 type SettleConsumer struct {
@@ -122,7 +123,7 @@ func (c *SettleConsumer) flush(ctx context.Context) {
 			log.Printf("settle deduct user=%d amount=%d: %v", g.userID, g.totalPrice, err)
 			continue
 		}
-		if err := c.walletCache.LoadBalance(ctx, g.userID); err != nil {
+		if err := c.walletCache.SyncBalance(ctx, g.userID); err != nil {
 			log.Printf("settle sync redis user=%d: %v", g.userID, err)
 		}
 		batchToken := token.Encode(g.userID, g.anchorID, time.Now().UnixMilli()/100*100)

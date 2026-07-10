@@ -82,7 +82,7 @@ func (s *GiftService) SendGift(ctx context.Context, reqID string, userID, roomID
 		log.Printf("combo incr: %v", err)
 		comboCount = 1
 	} else {
-		s.rdb.Expire(ctx, comboKey, 3*time.Second)
+		s.rdb.Expire(ctx, comboKey, 600*time.Second)
 	}
 
 	// 5. Leaderboard counter (ZINCRBY + segment tree MQ)

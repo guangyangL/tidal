@@ -20,7 +20,7 @@ func NewDeduplicator(rdb *redis.Client) *Deduplicator {
 
 // SETNX sets the key with 5s TTL. Returns ErrDuplicate if the key already exists.
 func (d *Deduplicator) SETNX(ctx context.Context, key string) error {
-	ok, err := d.rdb.SetNX(ctx, key, "1", 5*time.Second).Result()
+	ok, err := d.rdb.SetNX(ctx, key, "1", 600*time.Second).Result()
 	if err != nil {
 		return err
 	}

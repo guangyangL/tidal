@@ -1,8 +1,8 @@
 # Tidal（潮汐）—— 高并发直播连击打赏与结算引擎 · 技术方案文档
 
-> **版本:** v1.0  
-> **更新:** 2026-07-03  
-> **关键词:** 高并发 · 内存聚合 · 滑动窗口 · 最终一致性 · 幂等
+> **版本:** v2.0
+> **更新:** 2026-07-10
+> **关键词:** 高并发 · Redis Lua · MQ 异步落盘 · 乐观锁 · 幂等 · 线段树排名
 
 ---
 
@@ -10,13 +10,11 @@
 
 1. [项目概述](#1-项目概述)
 2. [业务边界](#2-业务边界)
-3. [核心指标](#3-核心指标)
-4. [架构总览](#4-架构总览)
-5. [数据库设计](#5-数据库设计)
-6. [核心模块设计](#6-核心模块设计)
-7. [高并发设计要点](#7-高并发设计要点)
-8. [容错与降级](#8-容错与降级)
-9. [演进路线](#9-演进路线)
+3. [架构总览](#3-架构总览)
+4. [数据库设计](#4-数据库设计)
+5. [核心模块设计](#5-核心模块设计)
+6. [高并发设计要点](#6-高并发设计要点)
+7. [容错与降级](#7-容错与降级)
 
 ---
 
@@ -26,28 +24,27 @@
 
 直播打赏业务的流量特征呈现极端的 **"潮汐现象"**：
 
-- **平时:** 风平浪静，每分钟几十次送礼请求，MySQL 直写毫无压力。
+- **平时:** 风平浪静，每分钟几十次送礼请求。
 - **PK 决胜 / 大主播高潮:** 5 秒内涌入数万并发连击，直接打穿传统同步写架构。
 
-Tidal 引擎正是为解决这一矛盾而生的中间层核心业务模块。
+Tidal 引擎通过 **Redis Lua 原子预扣 + MQ 异步批量落盘 + MySQL CAS 乐观锁** 的组合，将高峰流量削峰后写入数据库。
 
 ### 1.2 核心思想
 
-一句话概括：**"把 100 次连击在内存里吃掉，只让 1 次落到数据库。"**
+> 请求路径上只做快操作，慢操作全部异步。
 
-利用 Go 的 goroutine + Channel 做本地内存滑动窗口聚合，在进程内完成流量的"海啸削峰"，将 DB 写压力降低 1~2 个数量级。
+- 同步路径（毫秒级）：幂等校验 → 礼物价格查询 → Redis Lua 预扣 → 连击计数 → 排行榜写入 → MQ 投递
+- 异步路径（100ms 批量）：MQ 消费 → 分组聚合 → MySQL CAS 扣减 → 流水记录 → Redis 余额同步
 
 ### 1.3 系统定位
 
-Tidal 是一个纯粹的 **中间层核心业务引擎**，不是大一统平台。
-
-| 职责内（硬核实现） | 职责外（Mock / 假接口隔离） |
-|---|---|
-| 高并发送礼与连击请求接收 | 用户登录认证（网关层已做，Tidal 只认 Header 的 UserID） |
-| 内存级防超卖与极速账务扣减 | 视频流推拉流（音视频基建） |
-| 连击订单的滑动窗口聚合 | 用户真实充值（假设钱包已有足够"金币"） |
-| 直播间财富 / 贡献榜实时计算 | 主播提现与对账（下游结算系统） |
-| 可靠投递 MQ 通知分账 | 风控策略引擎（Tidal 只做幂等防重，不做规则判断） |
+| 职责内 | 职责外 |
+| --- | --- |
+| 高并发送礼请求处理 | 用户登录认证（网关层已做，Tidal 只认 Header） |
+| Redis Lua 原子预扣防超卖 | 视频推拉流 |
+| MQ 异步批量落盘 | 用户充值 |
+| 直播间排行榜实时计算 | 主播提现与对账 |
+| 可靠投递 MQ 通知分账 | 风控规则引擎 |
 
 ---
 
@@ -55,526 +52,422 @@ Tidal 是一个纯粹的 **中间层核心业务引擎**，不是大一统平台
 
 ### 2.1 Tidal 负责的完整请求路径
 
-```
-客户端连击触发
+```text
+POST /api/v1/gift/send
     │
     ▼
 ┌─────────────────────────┐
-│  1. 极速鉴权与拦截       │  ← Redis: 余额检查 + 礼物合法性
-│     (内存级，百微秒级)    │
-└─────────┬───────────────┘
-          │ 通过
-          ▼
-┌─────────────────────────┐
-│  2. 内存连击聚合         │  ← Go Sliding Window (3s窗口)
-│     (核心亮点, 异步写)    │     同一 (user, anchor, gift) 合并计数
-└─────────┬───────────────┘
-          │ 窗口期满
-          ▼
-┌─────────────────────────┐
-│  3. 异步落盘与流水生成    │  ← 1条聚合记录 = N次连击
-│     (CAS乐观锁 + 幂等)   │     写入 t_gift_record + 更新 t_user_wallet
-└─────────┬───────────────┘
-          │ 落盘成功
-          ▼
-┌─────────────────────────┐
-│  4. 榜单热度刷新         │  ← 异步 goroutine 写入 Redis ZSet
-│     (协程异步，不阻塞主链) │     实时刷新贡献榜
+│  1. Auth Middleware      │  ← X-User-ID header → user_id
 └─────────┬───────────────┘
           │
           ▼
 ┌─────────────────────────┐
-│  5. 最终一致性结算        │  ← 投递 MQ → 下游分账消费
-│     (MQ 可靠投递)        │
+│  2. Idempotent Check     │  ← Redis SETNX 600s TTL
+│     (X-Request-ID)       │
+└─────────┬───────────────┘
+          │ 通过
+          ▼
+┌─────────────────────────┐
+│  3. Gift Price Lookup    │  ← Redis HGET → MySQL fallback
+└─────────┬───────────────┘
+          │
+          ▼
+┌─────────────────────────┐
+│  4. Wallet PreDeduct     │  ← Redis Lua {GET, CHECK, DECRBY, EXPIRE}
+│     (原子预扣)            │
+└─────────┬───────────────┘
+          │
+          ▼
+┌─────────────────────────┐
+│  5. Combo Counter        │  ← Redis INCR + EXPIRE 600s
+│     (连击窗口 3s)         │
+└─────────┬───────────────┘
+          │
+          ▼
+┌─────────────────────────┐
+│  6. Leaderboard Counter  │  ← ZINCRBY + MQ → 线段树
+└─────────┬───────────────┘
+          │
+          ▼
+┌─────────────────────────┐
+│  7. Publish Settle Event │  ← MQ routing key: gift.settle
+└─────────┬───────────────┘
+          │
+          ▼
+┌─────────────────────────┐
+│  8. Return OK            │  ← 同步路径结束
+└─────────────────────────┘
+
+异步路径:
+┌─────────────────────────┐
+│  Settle Consumer         │  ← 100ms 批量消费
+│  ├─ 分组聚合              │
+│  ├─ MySQL CAS 乐观锁扣减  │
+│  ├─ INSERT 流水 (幂等)     │
+│  └─ SyncBalance 安全同步 Redis│
+└─────────────────────────┘
+
+┌─────────────────────────┐
+│  Leaderboard Consumer    │  ← 即时消费
+│  └─ Redis Lua HINCRBY    │
+│     线段树更新            │
 └─────────────────────────┘
 ```
 
 ### 2.2 不在此次实现范围内的
 
-- 用户注册 / 登录 / 鉴权
-- 直播间元数据管理（房间创建、销毁、封禁）
+- 用户注册 / 登录 / 鉴权（网关层处理）
+- 直播间元数据管理
 - 礼物特效、动画渲染
 - 主播提现、平台对账
-- 风控规则引擎（命中规则直接拒绝策略由业务方配置）
+- 风控规则引擎
 
 ---
 
-## 3. 核心指标
+## 3. 架构总览
 
-| 指标 | 目标值 | 备注 |
-|---|---|---|
-| 单机 QPS（送礼请求） | 50,000+ | 内存聚合前端接口 |
-| P99 延迟 | < 50ms | 客户端"送礼成功"响应 |
-| 滑动窗口聚合比 | ≥ 50:1 | 窗口内连击合并率 |
-| DB 写放大系数 | ≤ 1.02 | 聚合后几乎 1:1 写入 |
-| 数据零丢失 | 幂等 + 重试保障 | batch_token 唯一键兜底 |
-| 分账延迟 | < 30s（P99）| 从记录落盘到 MQ 投递完成 |
-
----
-
-## 4. 架构总览
-
-### 4.1 技术栈
+### 3.1 实际技术栈
 
 | 层 | 选型 | 理由 |
-|---|---|---|
-| 编程语言 | Go 1.22+ | 原生 goroutine + Channel，天然适合内存聚合削峰 |
-| HTTP 框架 | Gin / Fiber | 高性能路由，中间件链支持 |
-| 内存缓存 | Redis (go-redis) | 余额预扣、ZSet 排行榜、礼物配置缓存 |
-| 主数据库 | MySQL 8.0+ (InnoDB) | 事务 + 行锁 + 唯一索引幂等 |
-| 消息队列 | RabbitMQ / Kafka | 最终一致性解耦 |
-| ID 生成器 | 雪花算法 (Sonyflake) | 全局趋势递增 ID |
+| --- | --- | --- |
+| 编程语言 | Go 1.25 | goroutine + Channel，原生并发 |
+| HTTP 框架 | Gin | 路由性能 + 中间件链 |
+| 配置加载 | Viper | YAML + 环境变量覆盖（TIDAL_ 前缀） |
+| Redis 客户端 | go-redis v9 | Pipeline、Lua 脚本、Cluster |
+| 数据库 | MySQL 8.0 (InnoDB, sqlx) | 事务 + 行锁 + 唯一索引幂等 |
+| 消息队列 | RabbitMQ (amqp091-go) | Direct 交换器 + 持久化队列 |
+| ID 生成 | 自实现 Sonyflake | epoch=2026-01-01，MAC 地址定 workerId |
 
-### 4.2 模块划分
+### 3.2 模块划分
 
-```
-tidal-engine/
-├── cmd/server/              # 启动入口
-├── internal/
-│   ├── handler/             # HTTP handler (Gin routes)
-│   ├── middleware/          # 鉴权中间件 (解析 UserID)
-│   ├── service/             # 核心业务逻辑
-│   │   ├── gift_service.go      # 送礼主流程编排
-│   │   ├── wallet_service.go    # 钱包扣减与乐观锁
-│   │   └── settle_service.go    # 分账结算逻辑
-│   ├── aggregator/          # ★ 滑动窗口聚合器
-│   │   ├── window.go            # Sliding Window 实现
-│   │   └── flusher.go           # 窗口期满 → 异步落盘
-│   ├── repository/          # DB 访问层
-│   │   ├── wallet_repo.go
-│   │   ├── gift_repo.go
-│   │   └── record_repo.go
-│   ├── cache/               # Redis 访问层
-│   │   ├── wallet_cache.go      # 余额预扣/解冻
-│   │   ├── gift_cache.go        # 礼物配置缓存
-│   │   └── leaderboard.go       # ZSet 排行榜
-│   └── mq/                  # 消息队列封装
-│       ├── producer.go
-│       └── consumer.go
-├── pkg/
-│   ├── token/               # batch_token 生成器
-│   └── idgen/               # 雪花算法 ID 生成
-├── scripts/sql/             # DDL
-├── docs/                    # 文档
-└── go.mod
+```text
+cmd/server/main.go
+internal/
+├── cache/        Redis 访问层（wallet Lua, gift, dedup SETNX）
+├── config/       Viper 配置加载
+├── event/        MQ 事件结构体
+├── handler/      Gin HTTP handler
+├── leaderboard/  排行榜（ZSet + 线段树 + MQ consumer）
+├── middleware/   Auth（X-User-ID header）
+├── model/        DB 结构体
+├── mq/           RabbitMQ 封装（connect, producer, consumer）
+├── repository/   MySQL/sqlx 数据访问
+└── service/      业务编排（送礼流程 + settle consumer）
+pkg/
+├── idgen/        Sonyflake + base62 编码
+└── token/        batch_token 编码
 ```
 
 ---
 
-## 5. 数据库设计
+## 4. 数据库设计
 
-### 5.1 设计原则
+### 4.1 设计原则
 
-**高内聚:** 只存储 Tidal 自身流转必需的数据，不混入充值、提现、房间元数据。  
-**零冗余:** 同一份数据只在最合适的位置存一份。  
+**高内聚:** 只存储 Tidal 自身流转必需的数据。
+**零冗余:** 同一份数据只在最合适的位置存一份。
 **留钩子:** 用 `extra` JSON 字段和 `wallet_type` 等扩展点为上下游预留衔接能力。
 
-### 5.2 三张核心表
+### 4.2 三张核心表
 
-详见 `scripts/sql/001_init_schema.sql`，此处只强调关键设计意图。
-
-#### 5.2.1 `t_user_wallet` —— 用户虚拟钱包
+#### 4.2.1 `t_user_wallet` —— 用户虚拟钱包
 
 ```sql
 CREATE TABLE `t_user_wallet` (
-    `user_id`       BIGINT   NOT NULL,
-    `balance`       BIGINT   NOT NULL DEFAULT 0,
-    `frozen_amount` BIGINT   NOT NULL DEFAULT 0,   -- [新增] 两阶段扣减用
-    `wallet_type`   TINYINT  NOT NULL DEFAULT 0,   -- [新增] 0-充值币 1-赠送币
-    `version`       INT      NOT NULL DEFAULT 0,
-    `update_time`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `user_id`     BIGINT   NOT NULL,
+    `balance`     BIGINT   NOT NULL DEFAULT 0,
+    `wallet_type` TINYINT  NOT NULL DEFAULT 0,   -- 0-充值币 1-赠送币
+    `version`     INT      NOT NULL DEFAULT 0,   -- 乐观锁
+    `update_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`user_id`)
 );
 ```
 
-**为什么需要 `frozen_amount`？**
+**乐观锁 (`version`) 的 CAS 扣减：**
 
-> 两阶段扣减流程：
-> 1. 请求到达 → Redis 扣减余额（预扣），记录冻结标记
-> 2. 滑动窗口期满 → 开启 DB 事务：`balance` 扣减确认，`frozen_amount` 清0
-> 3. 若第2步崩溃 → 重启后扫描 `frozen_amount > 0` 的记录，与聚合窗口状态比对后决定"确认"或"解冻"
->
-> 没有这个字段，Redis 预扣后进程崩溃，资金状态永远不一致。
+```sql
+UPDATE t_user_wallet
+SET balance = balance - ?, version = version + 1
+WHERE user_id = ? AND version = ? AND balance >= ?
+```
 
-**乐观锁 (`version`) 的冲突处理：**
+- `RowsAffected = 0` + balance 不足 → `ErrInsufficientBalance`（不重试）
+- `RowsAffected = 0` + balance 充足 → 版本冲突 → 重试（最多 3 次，指数退避 10ms/20ms/30ms）
 
-- 默认 CAS: `UPDATE SET balance = balance - ?, version = version + 1 WHERE user_id = ? AND version = ?`
-- 冲突率 > 阈值时，回退到 Redis 层做预扣，DB 层异步批量消化
-
-#### 5.2.2 `t_gift_config` —— 礼物配置
+#### 4.2.2 `t_gift_config` —— 礼物配置
 
 ```sql
 CREATE TABLE `t_gift_config` (
-    `gift_id`     INT          NOT NULL AUTO_INCREMENT,
-    `name`        VARCHAR(64)  NOT NULL,
-    `price`       BIGINT       NOT NULL,
-    `status`      TINYINT      NOT NULL DEFAULT 1,
-    `extra`       JSON         DEFAULT NULL,   -- [新增] 限时折扣、特效加成
-    `create_time` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `gift_id`     INT         NOT NULL AUTO_INCREMENT,
+    `name`        VARCHAR(64) NOT NULL,
+    `price`       BIGINT      NOT NULL,
+    `status`      TINYINT     NOT NULL DEFAULT 1,
+    `extra`       JSON        DEFAULT NULL,
+    `create_time` TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`gift_id`)
 );
 ```
 
-**读取策略：**
+**读取策略：** Redis `HGET gift:config:{gift_id} price` → 命中直接返回 → cache miss 查 MySQL 回表。
 
-- 首次启动：全量加载到 Redis Hash (`HGETALL t_gift_config`)
-- 增量更新：管理者后台变更 → 发送缓存失效事件 → Tidal 监听并刷新
-- 送礼请求的整个生命周期 **完全不查 MySQL**
-
-#### 5.2.3 `t_gift_record` —— 礼物投递流水（核心账本）
+#### 4.2.3 `t_gift_record` —— 礼物投递流水
 
 ```sql
 CREATE TABLE `t_gift_record` (
-    `id`            BIGINT       NOT NULL AUTO_INCREMENT,
-    `batch_token`   VARCHAR(64)  NOT NULL,           -- 业务幂等键（非UUID，见下文）
-    `room_id`       BIGINT       NOT NULL,
-    `user_id`       BIGINT       NOT NULL,
-    `anchor_id`     BIGINT       NOT NULL,
-    `gift_id`       INT          NOT NULL,
-    `combo_count`   INT          NOT NULL DEFAULT 1,
-    `total_amount`  BIGINT       NOT NULL,
-    `status`        TINYINT      NOT NULL DEFAULT 1, -- 1-待分账 2-成功 3-待重试 4-死信
-    `retry_count`   TINYINT      NOT NULL DEFAULT 0, -- [新增] 重试次数
-    `settle_time`   TIMESTAMP    NULL,                -- [新增] 分账完成时间
-    `extra`         JSON         DEFAULT NULL,        -- [新增] 抽成比例等
-    `create_time`   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `id`           BIGINT      NOT NULL AUTO_INCREMENT,
+    `batch_token`  VARCHAR(64) NOT NULL,          -- 幂等键
+    `room_id`      BIGINT      NOT NULL,
+    `user_id`      BIGINT      NOT NULL,
+    `anchor_id`    BIGINT      NOT NULL,
+    `gift_id`      INT         NOT NULL,
+    `total_amount` BIGINT      NOT NULL,          -- 聚合后总金额
+    `status`       TINYINT     NOT NULL DEFAULT 1,
+    `create_time`  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_batch_token` (`batch_token`),
-    KEY `idx_room_anchor` (`room_id`, `anchor_id`),
-    KEY `idx_status_retry` (`status`, `retry_count`)
+    KEY `idx_room_anchor` (`room_id`, `anchor_id`)
 );
 ```
 
-**`batch_token` 的设计 —— 为什么不用 UUID？**
+**`batch_token` 设计：**
 
-```
+```text
 组成: user_id(42bit) | anchor_id(42bit) | window_start_ms(42bit)
  → base62 编码 ≈ 21 字符，趋势递增，避免 InnoDB 随机 IO 页分裂
 ```
 
-UUID v4 作为唯一索引在写入量大时会导致频繁的**页分裂**和**B+树节点重平衡**，实测 TPS 在 10w+ 时下降 40% 以上。趋势递增的复合 Token 将写入转化为顺序追加。
+UUID v4 作为唯一索引在写入量大时会导致频繁的 **页分裂** 和 **B+树节点重平衡**。趋势递增的复合 Token 将写入转化为顺序追加。
 
-**`combo_count` 的价值：**
+**结算状态：**
 
-用户点 100 次连击 → 1 条记录，`combo_count = 100`。这是整个架构"削峰"效果的可量化证明。
+| status | 含义 |
+| --- | --- |
+| 1 | 已扣款待分账 |
+| 2 | 分账成功 |
+| 3 | 失败待重试 |
+| 4 | 死信（人工介入） |
 
-**结算状态机流转：**
+### 4.3 Redis Key 设计
+
+| Key | 类型 | TTL | 说明 |
+|---|---|---|---|
+| `idempotent:{user_id}:{reqID}` | String | 600s | 幂等防重，SETNX，值固定 "1" |
+| `wallet:balance:{user_id}` | String | 3600s | 钱包余额，Lua 预扣 + SyncBalance 安全同步，每次写续期 |
+| `gift:config:{gift_id}` | Hash | — | 礼物配置全量缓存，field: price/name/status/extra |
+| `combo:{room}:{user}:{gift}` | String | 600s | 连击计数，INCR + EXPIRE |
+| `room:leaderboard:{room}` | ZSet | — | 排行榜，member=userID, score=累计送出 coins |
+| `counter:{room}:{user}` | String | — | 用户在该房间的累计总分，O(1) 查询 |
+| `seg_tree:{room}` | Hash | — | 线段树粗估排名，field=区间(如 `0-976`), value=该区间人数 |
+
+**线段树 (Segment Tree)：**
 
 ```
-     ① 创建 (已扣款待分账)
-          │
-          ▼
-     ② 分账成功 ◄── 正常 MQ 消费
-          │
-          ▼ (重试 ≤ 3 次)
-     ③ 失败待重试 ──→ ④ 死信 (人工介入)
+配置: MaxScore=1,000,000, BucketNumber=1024 → segLen=977, 共 2047 个 field
+
+seg_tree:{room_id}:  Hash
+  0-976:            100     ← 最低桶
+  977-1953:         45
+  ...
+  999024-1000000:   1       ← 最高桶
 ```
 
-`idx_status_retry` 索引支撑后台定时任务或 MQ 死信队列扫描待重试数据。
+- 写：MQ Consumer 收到 leaderboard 事件 → Lua `HINCRBY` 更新路径节点
+- 读：`HMGET` 路径节点 → 桶内线性插值 → 粗估排名
+- 排行榜查询优先走 ZSet `ZREVRANK`（精确），miss 才回退线段树（粗估）
 
-### 5.3 为什么不拆更多表？
+**每请求 Redis 操作：**
 
-面试中常见追问："你也说了流水表会越来越大，为什么不分库分表？"
-
-**回答口径：**
-
-> "分库分表是**长线演进**动作，不是初期设计。Tidal 第一阶段采用 **冷热分离**（定期归档 30 天前的数据到 TiDB / ClickHouse），配合 `create_time` 分区表，单表可支撑千万级日流水。
->
-> 当单表 QPS 持续超过 5000 或数据量突破 2 亿行，才会引入 ShardingSphere / 应用层分片。过早分片会带来跨节点事务、全局 ID 等不必要的复杂度，**架构演进应比业务领先一步，而不是领先十步。**"
+```
+SETNX     idempotent:{uid}:{reqID}        (写)
+HGET      gift:config:{gid}               (读)
+EVAL      wallet:balance:{uid}            (写, Lua)
+INCR      combo:{room}:{user}:{gift}      (写)
+EXPIRE    combo:{room}:{user}:{gift}      (写)
+ZINCRBY   room:leaderboard:{room}         (写)
+INCRBY    counter:{room}:{user}           (写)
+```
 
 ---
 
-## 6. 核心模块设计
+## 5. 核心模块设计
 
-### 6.1 极速鉴权与拦截（百微秒级）
+### 5.1 幂等校验（接入层）
 
-**位置:** HTTP 中间件层  
-**依赖:** Redis MSET / MGET
-
-```
-请求到达
-  │
-  ├─ 1. 从 Header 提取 UserID（网关已鉴权）
-  ├─ 2. [Redis Pipeline] MGET:
-  │      - KEY: wallet:balance:{user_id}        → 余额 ≥ 礼物单价？
-  │      - KEY: gift:config:{gift_id}            → 礼物上架且价格一致？
-  │      - KEY: room:pk:{room_id}                → 是否在 PK 状态（双倍加成？）
-  ├─ 3. 任一检查不通过 → 熔断，返回 427 (余额不足) / 404 (礼物下架)
-  └─ 4. 全部通过 → Redis DECRBY 预扣余额，继续向下传递
+```text
+X-Request-ID header → Redis SETNX idempotent:{user_id}:{reqID} 600s TTL
+  ├─ 成功 → 继续
+  └─ 失败 → HTTP 409 + code 3001 "duplicate request"
 ```
 
-**注意:** 步骤 4 的 Redis DECRBY 是**预扣（冻结）**，并非真正扣减。对应的 `frozen_amount` 会在异步落盘阶段确认。如果落盘失败，解冻流程在 `flusher.go` 中补偿。
+第 2 层防线：`batch_token` UNIQUE KEY，MySQL 级别兜底。
 
-### 6.2 内存连击聚合 —— 滑动窗口（★★★★★ 核心亮点）
+### 5.2 钱包预扣（Redis Lua）
 
-#### 6.2.1 为什么在内存中做？
-
-- 即使用 Redis 做 INCRBY，10 万次写仍然会打满网络 IO
-- 本地内存聚合的延迟是纳秒级的，且零网络开销
-- Go 的 goroutine + Channel 模式写起来非常简洁，天然并发安全
-
-#### 6.2.2 数据结构
-
-```go
-type ComboKey struct {
-    UserID   int64
-    AnchorID int64
-    GiftID   int
-}
-
-type ComboWindow struct {
-    Key        ComboKey
-    ComboCount int32
-    TotalAmount int64
-    WindowStart int64  // unix nano, 窗口起始时间
-    UserID     int64
-}
-
-// 全局聚合器
-type Aggregator struct {
-    mu       sync.RWMutex
-    windows  map[ComboKey]*ComboWindow
-    flushCh  chan *ComboWindow
-}
+```lua
+-- 原子操作：GET → CHECK → DECRBY → EXPIRE
+local balance = redis.call('GET', KEYS[1])
+if not balance then return {-1, 0} end       -- cache miss
+balance = tonumber(balance)
+if balance < tonumber(ARGV[1]) then return {-2, 0} end  -- insufficient
+redis.call('DECRBY', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], 3600)
+return {0, balance - tonumber(ARGV[1])}
 ```
 
-#### 6.2.3 流转逻辑
+**三态返回：**
 
-```
-每次送礼点请求
-    │
-    ├─ aggregator.Add(key, price)
-    │      │
-    │      ├─ 查找 windows[key]
-    │      ├─ 不存在 → 创建新窗口，记录 WindowStart = now
-    │      ├─ 存在且 (now - WindowStart) < 3s
-    │      │     └─ ComboCount++, TotalAmount += price
-    │      └─ 存在但 (now - WindowStart) >= 3s
-    │            └─ 旧窗口 → flushCh (异步落盘)
-    │            └─ 新窗口 → 重置 WindowStart，计数归零
-    │
-    └─ 返回 "送礼成功" 给客户端（实际还在窗口内）
+- `0` — 扣减成功
+- `-1` — cache miss → 从 MySQL 加载余额 → SET Redis → 重试一次 Lua
+- `-2` — 余额不足 → 返回 HTTP 402
+
+**Key 设计：** `wallet:balance:{user_id}`，TTL=1h，每次预扣自动续期。
+
+### 5.3 连击计数（Redis INCR）
+
+```redis
+INCR combo:{room_id}:{user_id}:{gift_id}
+EXPIRE combo:{room_id}:{user_id}:{gift_id} 3
 ```
 
-#### 6.2.4 关键问题：进程重启丢数据？
+- TTL=3s 即连击窗口。连续送礼 → combo 递增，超过 3s 不送 → key 过期归零
+- 全服务共享 Redis，WS 网关可直读 combo 数广播房间
 
-> **回答：**
->
-> "滑动窗口是纯内存结构，进程重启确实会丢失未刷新的窗口数据。但我们有 **两层兜底**：
->
-> 1. **上游客户端重试机制：** 客户端收到超时或断开后会重发请求，Tidal 通过 `batch_token` 检测幂等。丢失的窗口最多导致 3 秒的连击记录丢失，对用户体验影响有限。
-> 2. **Redis 中间状态：** 每次预扣都在 Redis 中留有痕迹。进程恢复后，启动阶段会扫描 Redis 中 `frozen_amount > 0` 的异常数据，通过与客户端最终确认来补偿。
->
-> 如果要做到 **严格不丢**，可以引入 Write-Ahead Log（预写日志），但会牺牲 10%~20% 的性能，属于典型的 CAP 权衡。在直播场景中，丢失 1~2 秒的连击可以接受，我们选择保性能。"
->
-> **（面试官会认可这种 "trade-off" 式思考方式。）**
+### 5.4 排行榜
 
-### 6.3 异步落盘与流水生成
+#### 写路径: Counter.AddScore
 
-从 `flushCh` 消费 `ComboWindow` 的 worker goroutine：
-
+```text
+1. INCRBY counter:{room}:{user} {delta}          → 个人总分（粗估排名用）
+2. ZINCRBY room:leaderboard:{room} {delta} {uid} → ZSet 精确排名
+3. MQ Publish gift.leaderboard                    → 线段树异步更新
 ```
-worker 收到 ComboWindow
-    │
-    ├─ 1. 生成 batch_token = EncodeBase62(user_id, anchor_id, WindowStart)
-    │
-    ├─ 2. 开启 MySQL 事务
-    │      ├─ UPDATE t_user_wallet SET balance -= totalAmount, 
-    │      │   frozen_amount -= totalAmount, version += 1
-    │      │   WHERE user_id = ? AND version = ?
-    │      │   (乐观锁，失败则回滚并重试)
-    │      │
-    │      └─ INSERT INTO t_gift_record (batch_token, ...)
-    │          ON DUPLICATE KEY UPDATE ... (幂等)
-    │
-    ├─ 3. 事务提交成功
-    │      └─ 异步 goroutine: Redis ZINCRBY room:leaderboard:{room_id}
-    │
-    └─ 4. 投递 MQ 消息 (通知结算)
+
+#### 读路径
+
+```text
+GET /api/v1/room/:room_id/leaderboard?top=50
+  → ZREVRANGE room:leaderboard:{room} 0 49 WITHSCORES  (精确)
+
+GET /api/v1/room/:room_id/rank?user_id=1001
+  → ZSet 有 → ZREVRANK 精确
+  → ZSet 无 → counter:{room}:{user} 拿积分 → HMGet 线段树 → 粗估排名
+```
+
+#### 线段树
+
+分数范围 [0, 1,000,000]，1024 个桶，固定 ~2047 个 Redis Hash key：
+
+```text
+seg_tree:{room_id}:  Hash
+  0-976:            100
+  999024-1000000:   1
+```
+
+- **更新：** Leaderboard Consumer 收到 MQ 事件 → Lua `HINCRBY` 路径节点
+- **查询：** `HMGET` 路径节点 + 桶内线性插值 → 粗估排名
+- **优势：** key 数量固定，人数再大不膨胀 ZSet 大 key
+
+### 5.5 异步落盘（Settle Consumer）
+
+```text
+100ms ticker 触发
+  ├─ 1. 从 buffer 取出本批事件
+  ├─ 2. 按 (user, anchor, gift, room) hash 分组
+  ├─ 3. 每组: 累加 totalAmount
+  ├─ 4. MySQL 事务:
+  │     ├─ walletRepo.Deduct(userID, amount, version)  — CAS 乐观锁, 最多 retry 3 次
+  │     └─ recordRepo.Insert(record)                    — batch_token UNIQUE KEY 幂等
+  └─ 5. walletCache.SyncBalance(userID)                 — 安全同步（只降不升）
 ```
 
 **关键设计：**
 
-- **事务内先扣钱包再写流水：** 两者必须同时成功。钱包扣了但流水没写 = 丢钱事故。
-- **幂等插入：** `batch_token` 的唯一索引确保重复投递不会生成重复流水。即使上游重试、worker 重复消费，最多产生一次有效扣款。
-- **乐观锁重试：** 版本冲突时，worker 在 goroutine 内自旋重试（指数退避，最多 3 次）。超过次数进入死信。
+- **CAS 先扣钱包再写流水：** 钱包扣了但流水没写 = 丢钱事故，两者顺序不可颠倒
+- **乐观锁重试：** 版本冲突时指数退避（10ms → 20ms → 30ms），最多 3 次
+- **幂等插入：** `ON DUPLICATE KEY UPDATE id=id`，重复投递不产生重复流水
+- **SyncBalance 安全同步：** Lua 脚本只在 MySQL < Redis 时写入，防止覆盖未结算的 Redis 预扣，保证 Redis 永不高估余额
 
-### 6.4 榜单热度刷新
+### 5.6 MQ 可靠投递
 
-```
-// 负责刷新贡献榜的 goroutine（goroutine-safe, 非阻塞）
-func (s *LeaderboardService) Flush(roomID, userID int64, amount int64) {
-    key := fmt.Sprintf("room:leaderboard:%d", roomID)
-    s.redis.ZIncrBy(ctx, key, float64(amount), strconv.FormatInt(userID, 10))
-    // ZSet 自动排序，无需额外维护
-}
-```
+```text
+Producer:
+  PublishWithContext(ctx, exchange, routingKey, persistent=true)
+  → 3s timeout → 失败则客户端重试
 
-**为什么不放在事务内？**
-
-> "榜单是 '尽力而为实时' 的 —— 就算丢失几次 ZIncrBy，用户刷新页面后下一次聚合也会覆盖。用异步 goroutine 刷新，避免 Redis 网络抖动阻塞主链路的事务提交。如果 Redis 宕机，降级为 30 秒定时全量扫描 DB 重建排行榜。榜单不参与资金链路，允许写失败。"
-
-### 6.5 最终一致性结算
-
-```
-                    ┌──────────────────┐
-                    │   t_gift_record   │
-                    │   status = 1      │
-                    └────────┬─────────┘
-                             │
-                   落盘成功触发
-                             ▼
-                    ┌──────────────────┐
-                    │    MQ Producer    │
-                    │   topic: settle   │
-                    └────────┬─────────┘
-                             │
-                    可靠投递（confirm 模式）
-                             ▼
-                    ┌──────────────────┐
-                    │  下游结算 Consumer │
-                    │                    │
-                    │ 1. 读取 settle_time │
-                    │ 2. 更新 status = 2 │
-                    │ 3. 调用分成接口     │
-                    └──────────────────┘
+Consumer:
+  Handle(msg) → 成功 → Ack
+  Handle(msg) → 失败 → Nack(requeue=true) → 重新入队
 ```
 
-**重试机制：**
+Exchange: `tidal.settle` (direct, durable)
 
-| 重试次数 | 行为 |
-|---|---|
-| 0 | 首次投递 |
-| 1~3 | MQ 自动重试（延时队列，每次间隔 10s） |
-| > 3 | `status = 4`（死信），人工介入处理 |
+Queues:
+
+- `tidal.settle.queue` ← routing key `gift.settle`（落盘消费）
+- `tidal.leaderboard` ← routing key `gift.leaderboard`（线段树消费）
 
 ---
 
-## 7. 高并发设计要点
+## 6. 高并发设计要点
 
-### 7.1 乐观锁 vs 悲观锁
+### 6.1 乐观锁 vs 悲观锁
 
 | 场景 | 选择 | 理由 |
-|---|---|---|
-| DB 层钱包扣减 | 乐观锁 (`version`) | InnoDB 行锁在热点行冲突率高时退化为互斥，乐观锁让冲突回滚自旋，不阻塞其他事务 |
-| Redis 预扣 | WATCH + MULTI / Lua | Redis 单线程不需要锁，Lua 脚本保证原子性 |
-| 内存窗口 | sync.RWMutex | 读多写少（送礼读、窗口期满写），RWMutex 优于 Mutex |
+| --- | --- | --- |
+| DB 层钱包扣减 | 乐观锁 (`version`) | 冲突回滚自旋，不阻塞其他事务 |
+| Redis 预扣 | Lua 脚本 | Redis 单线程不需要锁，Lua 保证原子性 |
 
-### 7.2 幂等防线
+### 6.2 幂等防线
 
-```
-请求层:   客户端全局序列号 (UUID)
+```text
+接入层: Redis SETNX (5s TTL) 防重复提交
     │
     ▼
-接入层:   Redis SetNX (5s 过期) 防重复提交
-    │
-    ▼
-持久层:   batch_token 唯一索引 (终极兜底)
+持久层: batch_token UNIQUE KEY (终极兜底)
 ```
 
-三层防线逐步收敛，越往内层越严格。最内层 MySQL 唯一索引是**最终防线**，确保即使前面全部失效，也不会产生重复扣款。
+两层防线逐步收敛，MySQL 唯一索引是 **最终防线**。
 
-### 7.3 内存聚合削峰效果
+### 6.3 批量聚合削峰效果
 
+```text
+场景: 大主播 PK 5s, 5000 用户每人连击 20 次 = 100,000 次请求
+
+无聚合直写: 100,000 INSERT + 100,000 UPDATE → 行锁争用 → 雪崩
+
+Tidal: 100ms 批量分组, 每 (user,anchor,gift,room) 聚合为 1 条
+      5000 用户 × 1 条/窗口 ≈ 5000 INSERT + 5000 UPDATE (每 100ms)
+      → DB 写压力降低 95%+
 ```
-场景: 大主播 PK 最后 5s, 5000 用户每人连击 20 次 = 100,000 次请求
 
-无聚合直写:  100,000 次 INSERT + 100,000 次 UPDATE (钱包)
-            → 行锁争用 → 连接池打满 → 雪崩
-
-Tidal 聚合: 窗口 3s, 每个 (user, anchor, gift) 聚合为 1 条
-            5000 用户 × 1 条 ≈ 5,000 条 INSERT + 5,000 UPDATE
-            → DB 写压力降低 95%+
-```
-
-### 7.4 数据库连接池调优
+### 6.4 数据库连接池
 
 ```go
-// 核心参数（非缺省值）
-sqlDB.SetMaxOpenConns(50)       // 默认 0=无限，必须设上限
-sqlDB.SetMaxIdleConns(20)       // 保持预热连接
-sqlDB.SetConnMaxLifetime(30 * time.Minute)  // 防止长时间连接被 LB 切断
+db.SetMaxOpenConns(50)
+db.SetMaxIdleConns(20)
 ```
 
 ---
 
-## 8. 容错与降级
+## 7. 容错与降级
 
-### 8.1 降级策略矩阵
+### 7.1 降级策略
 
 | 故障点 | 降级动作 | 影响 |
-|---|---|---|
-| Redis 宕机 | 跳过预扣，直接走 DB 乐观扣减 | 延迟升高，功能正常 |
-| MySQL 不可用 | 返回"送礼失败"，客户端重试 | 用户感知，资金安全 |
-| 滑动窗口打满 | 同步写（绕过窗口，直接落盘） | 退化为直写，DB 压力升高 |
-| MQ 不可用 | 本地文件暂存 + 定时重投 | 结算延迟，不丢数据 |
-| 单机 OOM | Kubernetes 重新调度，客户端重连重试 | 秒级中断 |
+| --- | --- | --- |
+| Redis 不可用 | Lua 脚本失败 → 上层拒绝请求 | 功能不可用，资金安全 |
+| MySQL 不可用 | Settle consumer 阻塞 → 自然背压 | 落盘延迟，Redis 余额在 |
+| MQ 不可用 | Publish 超时 3s → 返回成功（best effort） | 少量事件丢失，可通过补偿机制恢复 |
+| 版本冲突高 | 重试 3 次 → 放弃本批 | 进入下个 100ms 窗口重试 |
 
-### 8.2 死信处理
+### 7.2 优雅关闭
 
-`t_gift_record` 中 `retry_count >= 3` 且 `status = 3` 的记录，标记为 `status = 4`（死信），不再自动重试。
-
-监控告警规则：
-
+```text
+1. http.Server.Shutdown  — 停止接受新请求
+2. Settle consumer 停止  — 等待最后一个 flush 完成
+3. MQ 连接关闭            — 确保已确认消息
+4. DB 连接池关闭
 ```
-⚠️ WARNING: 死信数量 > 10/min → 企业微信 / 钉钉告警
-🔴 CRITICAL: 死信数量 > 100/min → 电话值班 On-Call
-```
-
-### 8.3 优雅关闭
-
-```go
-// server.go
-func (s *Server) Shutdown(ctx context.Context) error {
-    // 1. 停止接受新请求 (http.Server.Shutdown)
-    // 2. 强制刷出所有未完成的滑动窗口 (Aggregator.FlushAll)
-    // 3. 等待所有 in-flight 事务完成 (sync.WaitGroup)
-    // 4. 关闭 MQ 连接 (确保已有消息确认)
-    // 5. 关闭 DB 连接池
-}
-```
-
----
-
-## 9. 演进路线
-
-### Phase 1（第 1~2 周）—— 核心链路打通
-
-- 完成 3 张表的 DDL 与初始化
-- 实现送礼主流程 HTTP Handler
-- 实现单机滑动窗口聚合（`aggregator/`）
-- 完成 `t_user_wallet` 乐观锁扣减
-
-### Phase 2（第 3~5 周）—— 异步与可靠性
-
-- 聚合窗口期满 → 异步落盘
-- `batch_token` 幂等生成与校验
-- Redis 余额预扣 + 缓存刷新
-- 榜单 ZSet 写入
-- MQ 生产者接入
-
-### Phase 3（第 6~8 周）—— 压测与加固
-
-- 单机 5w QPS 压测（pprof 优化热点）
-- 死信队列 + 重试机制
-- 优雅关闭
-- 集成测试（幂等、并发扣减、故障注入）
-
-### Phase 4（第 9~12 周）—— 生产化
-
-- Docker + Docker Compose 编排
-- Prometheus 指标暴露（QPS、延迟、聚合比、死信数）
-- Grafana 看板
-- 文档完善 + 简历文案打磨
-
-### 未来（不在 3 个月范围内）
-
-| 项目 | 触发条件 |
-|---|---|
-| 分库分表 (ShardingSphere) | 日流水 > 2 亿行 |
-| 冷热分离 (归档至 ClickHouse) | 单表 > 2TB |
-| 多区域部署 (就近接入) | 东南亚/欧美用户接入 |
-| 基于 QPS 的动态窗口大小 | 生产运行 1 个月后数据分析 |
 
 ---
 
@@ -583,27 +476,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 ### A. 面试对线题库
 
 | 面试官提问 | 回答方向 |
-|---|---|
-| 乐观锁冲突太高怎么办？ | Redis 预扣 + 异步批量消化；账务拆分降低热点 |
+| --- | --- |
+| 乐观锁冲突太高怎么办？ | Redis 预扣 + 异步批量消化；拆钱包分片降低热点 |
 | 为什么不用 UUID 做幂等键？ | InnoDB 随机 IO 页分裂，业务语义 Token 趋势递增 |
-| 滑动窗口丢数据怎么办？ | 客户端重试 + batch_token 幂等 + Redis 中间态补偿（CAP 权衡） |
-| 分账失败怎么处理？ | status + retry_count + MQ 死信，3 次后人工介入 |
-| 怎么保证不超卖？ | Redis 预扣冻结 → DB 乐观锁确认，两层校验 |
-| 榜单数据不准怎么办？ | "尽力而为实时"，允许短暂不一致，定期全量重建 |
-| K8s 滚动更新怎么保证不丢请求？ | 优雅关闭 + 客户端重试 + 幂等兜底 |
+| Redis 预扣后进程崩溃怎么办？ | wallet key TTL 1h 自动过期 → 下次请求触发 LoadBalance → MySQL 余额是准的；未结算的预扣不会多扣钱 |
+| 分账失败怎么处理？ | status + 重试 + MQ 死信，3 次后人工介入 |
+| 怎么保证不超卖？ | Redis Lua 预扣 + MySQL `WHERE balance >= ?` 双重校验 |
+| 榜单数据不准怎么办？ | "尽力而为实时"，ZSet 存精确 TopN，线段树粗估其余。定期可全量重建 |
+| 线段树为什么是 1024 个桶？ | 2047 个 Hash key 固定内存，Redis HMGET 一次取全路径 O(log N) |
 
 ### B. 错误码约定
 
 | HTTP 状态码 | 业务码 | 含义 |
-|---|---|---|
+| --- | --- | --- |
 | 200 | 0 | 成功 |
 | 400 | 1001 | 请求参数不合法 |
 | 402 | 2001 | 余额不足 |
 | 404 | 2002 | 礼物不存在或已下架 |
 | 409 | 3001 | 幂等冲突（重复请求） |
-| 429 | 4001 | 触发限流 |
-| 500 | 9001 | 内部服务错误 |
+| 503 | 9002 | 服务过载，稍后重试 |
 
 ---
 
-> 本文档对应 Tidal v1.0 的设计范围。所有设计决策均以 **可论证、可压测** 为前提，拒绝在面试中回答 "不知道，当时是这么写的"。
+> 本文档对应 Tidal v2.0 的实际实现。所有设计决策均以代码可验证为前提。

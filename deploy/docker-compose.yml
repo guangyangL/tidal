@@ -56,7 +56,6 @@ services:
     ports:
       - "8080:8080"
     environment:
-      TIDAL_SERVER_ADDR: ":8080"
       TIDAL_MYSQL_DSN: "root:root@tcp(tidal-mysql:3306)/tidal?charset=utf8mb4&parseTime=true&loc=Local"
       TIDAL_REDIS_ADDR: "tidal-redis:6379"
       TIDAL_RABBITMQ_URL: "amqp://guest:guest@tidal-rabbitmq:5672/"

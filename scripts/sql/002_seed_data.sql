@@ -3,10 +3,10 @@
 -- 礼物配置（荧光棒→火箭→嘉年华）
 INSERT INTO t_gift_config (gift_id, name, price, status) VALUES
 (1, '荧光棒',  10,   1),
-(2, '跑车',    1000, 1),
-(3, '火箭',    5000, 1),
-(4, '嘉年华',  30000,1),
-(5, '心动盲盒',50,   1);
+(2, '心动盲盒',30,   1),
+(3, '跑车',    100,  1),
+(4, '火箭',    300,  1),
+(5, '嘉年华',  1000, 1);
 
 -- 测试用户钱包
 INSERT INTO t_user_wallet (user_id, balance, wallet_type) VALUES

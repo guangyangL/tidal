@@ -89,12 +89,34 @@ func (c *WalletCache) GetBalance(ctx context.Context, userID int64) (int64, erro
 }
 
 // LoadBalance writes a user's MySQL balance into Redis.
+// Used for cache-miss recovery (blind SET).
 func (c *WalletCache) LoadBalance(ctx context.Context, userID int64) error {
 	bal, err := c.repo.GetBalance(ctx, userID)
 	if err != nil {
 		return err
 	}
 	return c.rdb.Set(ctx, walletKey(userID), bal, walletKeyTTL).Err()
+}
+
+var syncBalanceScript = redis.NewScript(`
+	local redis_bal = redis.call('GET', KEYS[1])
+	if not redis_bal then return 0 end
+	local mysql_bal = tonumber(ARGV[1])
+	if mysql_bal < tonumber(redis_bal) then
+		redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+	end
+	return 1
+`)
+
+// SyncBalance safely syncs Redis after a MySQL deduct.
+// Only updates if MySQL balance is LOWER — prevents overwriting
+// pending pre-deducts that haven't been settled yet.
+func (c *WalletCache) SyncBalance(ctx context.Context, userID int64) error {
+	bal, err := c.repo.GetBalance(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return syncBalanceScript.Run(ctx, c.rdb, []string{walletKey(userID)}, bal, walletKeyTTL).Err()
 }
 
 func walletKey(userID int64) string {

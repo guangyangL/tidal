@@ -9,8 +9,7 @@ RUN CGO_ENABLED=0 go build -o tidal ./cmd/server
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /app/tidal /usr/local/bin/tidal
-RUN mkdir -p /app/config
-COPY --from=builder /app/config/config.docker.yaml /app/config/config.yaml
+COPY --from=builder /app/config/config.yaml /etc/tidal/config.yaml
 
 EXPOSE 8080
 ENTRYPOINT ["tidal"]

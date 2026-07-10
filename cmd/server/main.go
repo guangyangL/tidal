@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +33,9 @@ func main() {
 	db.SetMaxOpenConns(cfg.MySQL.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MySQL.MaxIdleConns)
 
+	// auto-migrate tables
+	autoMigrate(db)
+
 	// --- Redis ---
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.Redis.Addr,
@@ -50,13 +52,6 @@ func main() {
 	dedup := cache.NewDeduplicator(rdb)
 	giftCache := cache.NewGiftCache(rdb, giftRepo)
 	walletCache := cache.NewWalletCache(rdb, walletRepo)
-
-	// warm up wallet balances
-	for _, uid := range []int64{1001, 1002, 1003, 2001, 3001} {
-		if err := walletCache.LoadBalance(context.Background(), uid); err != nil {
-			log.Printf("warmup wallet %d: %v", uid, err)
-		}
-	}
 
 	// --- MQ ---
 	var (
