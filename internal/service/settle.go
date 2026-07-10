@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/guangyang/tidal/internal/event"
@@ -30,6 +32,7 @@ type WalletBalanceSyncer interface {
 }
 
 type SettleConsumer struct {
+	db          *sqlx.DB
 	walletRepo  *repository.WalletRepo
 	recordRepo  *repository.RecordRepo
 	walletCache WalletBalanceSyncer
@@ -39,11 +42,13 @@ type SettleConsumer struct {
 }
 
 func NewSettleConsumer(
+	db *sqlx.DB,
 	walletRepo *repository.WalletRepo,
 	recordRepo *repository.RecordRepo,
 	walletCache WalletBalanceSyncer,
 ) *SettleConsumer {
 	return &SettleConsumer{
+		db:          db,
 		walletRepo:  walletRepo,
 		recordRepo:  recordRepo,
 		walletCache: walletCache,
@@ -53,11 +58,12 @@ func NewSettleConsumer(
 
 func StartSettleConsumer(
 	ch *amqp.Channel, exchange string,
+	db *sqlx.DB,
 	walletRepo *repository.WalletRepo,
 	recordRepo *repository.RecordRepo,
 	walletCache WalletBalanceSyncer,
 ) (*mq.Consumer, error) {
-	sc := NewSettleConsumer(walletRepo, recordRepo, walletCache)
+	sc := NewSettleConsumer(db, walletRepo, recordRepo, walletCache)
 	consumer, err := mq.NewConsumer(ch, exchange, "tidal.settle.queue", "gift.settle", sc.Handle)
 	if err != nil {
 		return nil, err
@@ -119,13 +125,6 @@ func (c *SettleConsumer) flush(ctx context.Context) {
 		if g.totalPrice == 0 {
 			continue
 		}
-		if err := c.deductRetry(ctx, g.userID, g.totalPrice); err != nil {
-			log.Printf("settle deduct user=%d amount=%d: %v", g.userID, g.totalPrice, err)
-			continue
-		}
-		if err := c.walletCache.SyncBalance(ctx, g.userID); err != nil {
-			log.Printf("settle sync redis user=%d: %v", g.userID, err)
-		}
 		batchToken := token.Encode(g.userID, g.anchorID, time.Now().UnixMilli()/100*100)
 		record := &model.GiftRecord{
 			BatchToken:  batchToken,
@@ -136,28 +135,74 @@ func (c *SettleConsumer) flush(ctx context.Context) {
 			TotalAmount: g.totalPrice,
 			Status:      model.RecordStatusDeducted,
 		}
-		if err := c.recordRepo.Insert(ctx, record); err != nil {
-			log.Printf("settle insert record user=%d: %v", g.userID, err)
+		if err := c.deductAndInsert(ctx, g.userID, g.totalPrice, record); err != nil {
+			log.Printf("settle deduct user=%d amount=%d: %v", g.userID, g.totalPrice, err)
+			continue
+		}
+		if err := c.walletCache.SyncBalance(ctx, g.userID); err != nil {
+			log.Printf("settle sync redis user=%d: %v", g.userID, err)
 		}
 	}
 }
 
-func (c *SettleConsumer) deductRetry(ctx context.Context, userID int64, amount int64) error {
+// deductAndInsert wraps wallet CAS deduct and record insert in a single MySQL transaction.
+// SyncBalance is intentionally outside the transaction — Redis cannot participate in 2PC
+// but inconsistency is recoverable via LoadBalance.
+func (c *SettleConsumer) deductAndInsert(ctx context.Context, userID int64, amount int64, record *model.GiftRecord) error {
 	for i := range 3 {
-		version, err := c.walletRepo.GetVersion(ctx, userID)
+		tx, err := c.db.BeginTxx(ctx, nil)
 		if err != nil {
-			return err
+			return fmt.Errorf("begin tx: %w", err)
 		}
-		_, err = c.walletRepo.Deduct(ctx, userID, amount, version)
-		if err == nil {
-			return nil
+
+		var version int
+		if err := tx.GetContext(ctx, &version, "SELECT version FROM t_user_wallet WHERE user_id = ?", userID); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("get version: %w", err)
 		}
-		if err == repository.ErrInsufficientBalance {
-			return err
+
+		res, err := tx.ExecContext(ctx,
+			`UPDATE t_user_wallet
+			 SET balance = balance - ?,
+			     version = version + 1
+			 WHERE user_id = ? AND version = ? AND balance >= ?`,
+			amount, userID, version, amount,
+		)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("deduct: %w", err)
 		}
-		time.Sleep(time.Duration(i+1) * 10 * time.Millisecond)
+
+		rows, _ := res.RowsAffected()
+		if rows == 0 {
+			tx.Rollback()
+			var bal int64
+			if err := c.db.GetContext(ctx, &bal, "SELECT balance FROM t_user_wallet WHERE user_id = ?", userID); err == nil && bal < amount {
+				return repository.ErrInsufficientBalance
+			}
+			time.Sleep(time.Duration(i+1) * 10 * time.Millisecond)
+			continue
+		}
+
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO t_gift_record
+			 (batch_token, room_id, user_id, anchor_id, gift_id, total_amount, status)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON DUPLICATE KEY UPDATE id=id`,
+			record.BatchToken, record.RoomID, record.UserID, record.AnchorID,
+			record.GiftID, record.TotalAmount, record.Status,
+		)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert record: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit tx: %w", err)
+		}
+		return nil
 	}
-	return nil
+	return fmt.Errorf("deduct retry exhausted for user %d", userID)
 }
 
 func settleHash(userID, anchorID, giftID, roomID int64) uint64 {

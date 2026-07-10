@@ -96,7 +96,7 @@ func main() {
 		if err != nil {
 			log.Printf("settle channel: %v", err)
 		} else {
-			settleMQ, err := service.StartSettleConsumer(settleCh, cfg.RabbitMQ.Exchange, walletRepo, recordRepo, walletCache)
+			settleMQ, err := service.StartSettleConsumer(settleCh, cfg.RabbitMQ.Exchange, db, walletRepo, recordRepo, walletCache)
 			if err != nil {
 				log.Printf("settle mq consumer: %v", err)
 			}
