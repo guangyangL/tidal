@@ -41,7 +41,7 @@
 
 | 组件 | 选型 | 备注 |
 |---|---|---|
-| ID 生成器 | **自实现 Sonyflake** | 基于 MAC 地址自动定 workerId，epoch=2026-01-01 |
+| ID 生成器 | **自实现 Sonyflake** | 基于内网 IP 低 16 位定 workerId，epoch=2026-01-01 |
 | 配置加载 | **Viper** | YAML 配置文件 + 环境变量覆盖（TIDAL_ 前缀） |
 | 日志 | **标准 log** | 当前阶段够用，后续可切 zap |
 | Docker | Compose | MySQL 8.0 + Redis 7 + RabbitMQ 3 编排 |
@@ -51,8 +51,8 @@
 ## 二、 目录结构
 
 ```
-cmd/server/main.go          # 启动入口：依赖注入 → 启动 HTTP
-config/config.yaml           # YAML 配置
+cmd/server/main.go            # 启动入口 + migrate.go 自动建表
+config/config.yaml             # 本地配置 + config.docker.yaml Docker 配置
 
 internal/
 ├── cache/                   # Redis 访问层
@@ -105,7 +105,8 @@ deploy/
 scripts/
 ├── sql/                      #   DDL 参考 + 种子数据
 ├── gen_targets.go            #   压测目标生成器
-└── loadtest.sh               #   压测脚本
+├── loadtest.sh               #   压测脚本
+└── combo.sh                  #   连击查看脚本
 ```
 
 ---

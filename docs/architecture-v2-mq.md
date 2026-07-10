@@ -195,17 +195,17 @@ MySQL 乐观锁 CAS 扣减（`WHERE user_id=? AND version=? AND balance>=?`）+ 
 
 | 场景 | 恢复 |
 |---|---|
-| 进程正常启动 | warmup 钱包 → Redis key 从 MySQL 加载 |
+| 进程正常启动 | 按需加载，首次 PreDeduct cache miss → LoadBalance 从 MySQL 加载 |
 | 进程崩溃 | MQ 持久化，consumer 追平 |
-| Redis 崩溃 | Lua 脚本返回错误 → 上层拒绝请求，等 Redis 恢复 |
+| Redis 崩溃 | Lua 脚本返回错误 → 上层拒绝请求，等 Redis 恢复 → 恢复后 SyncBalance 自动修正 |
 | MySQL 慢 | settle consumer 阻塞 → 自然背压 |
-| 钱包 key 不一致 | TTL 1h 后自动过期 → cache miss 触发 LoadBalance 重载 |
+| 钱包 key 过期 | TTL 1h 后自动过期 → cache miss 触发 LoadBalance 重载 |
 
 ## 文件结构
 
 ```
-cmd/server/main.go          # 启动入口：依赖注入 → 启动 HTTP
-config/config.yaml           # YAML 配置文件
+cmd/server/                   # 启动入口 + 自动建表 (main.go, migrate.go)
+config/                        # 配置文件 (config.yaml, config.docker.yaml)
 internal/
 ├── cache/                   # Redis 访问层（wallet, gift, dedup）
 ├── config/                  # Viper 配置加载
@@ -221,5 +221,5 @@ pkg/
 ├── idgen/                   # Sonyflake ID 生成 + base62 编码
 └── token/                   # batch_token 编码
 deploy/                      # Dockerfile + docker-compose.yml
-scripts/                     # 压测脚本 + DDL 参考
+scripts/                     # 压测脚本 + DDL 参考 (loadtest.sh, gen_targets.go, combo.sh, sql/)
 ```

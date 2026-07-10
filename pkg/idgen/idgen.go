@@ -2,6 +2,7 @@ package idgen
 
 import (
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
@@ -86,19 +87,18 @@ func hash(s string) uint32 {
 
 func EncodeBase62(src []byte) string {
 	const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	n := uint64(0)
-	for _, b := range src {
-		n = n*256 + uint64(b)
-	}
-	if n == 0 {
+	n := new(big.Int).SetBytes(src)
+	if n.Sign() == 0 {
 		return string(chars[0])
 	}
+	div := big.NewInt(62)
+	mod := new(big.Int)
 	var dst [22]byte
-	i := 21
-	for n > 0 {
+	i := 22
+	for n.Sign() > 0 {
 		i--
-		dst[i] = chars[n%62]
-		n /= 62
+		n.DivMod(n, div, mod)
+		dst[i] = chars[mod.Int64()]
 	}
 	return string(dst[i:])
 }

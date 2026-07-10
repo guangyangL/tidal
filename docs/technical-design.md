@@ -1,4 +1,4 @@
-# Tidal（潮汐）—— 高并发直播连击打赏与结算引擎 · 技术方案文档
+# Tidal（潮汐）—— 高并发直播打赏服务 · 技术方案文档
 
 > **版本:** v2.0
 > **更新:** 2026-07-10
@@ -27,7 +27,7 @@
 - **平时:** 风平浪静，每分钟几十次送礼请求。
 - **PK 决胜 / 大主播高潮:** 5 秒内涌入数万并发连击，直接打穿传统同步写架构。
 
-Tidal 引擎通过 **Redis Lua 原子预扣 + MQ 异步批量落盘 + MySQL CAS 乐观锁** 的组合，将高峰流量削峰后写入数据库。
+Tidal 通过 **Redis Lua 原子预扣 + MQ 异步批量落盘 + MySQL CAS 乐观锁** 的组合，将高峰流量削峰后写入数据库。
 
 ### 1.2 核心思想
 
@@ -136,7 +136,7 @@ POST /api/v1/gift/send
 | Redis 客户端 | go-redis v9 | Pipeline、Lua 脚本、Cluster |
 | 数据库 | MySQL 8.0 (InnoDB, sqlx) | 事务 + 行锁 + 唯一索引幂等 |
 | 消息队列 | RabbitMQ (amqp091-go) | Direct 交换器 + 持久化队列 |
-| ID 生成 | 自实现 Sonyflake | epoch=2026-01-01，MAC 地址定 workerId |
+| ID 生成 | 自实现 Sonyflake | epoch=2026-01-01，内网 IP 低 16 位定 workerId |
 
 ### 3.2 模块划分
 
@@ -233,7 +233,7 @@ CREATE TABLE `t_gift_record` (
 
 ```text
 组成: user_id(42bit) | anchor_id(42bit) | window_start_ms(42bit)
- → base62 编码 ≈ 21 字符，趋势递增，避免 InnoDB 随机 IO 页分裂
+ → base62 编码 21-22 字符，趋势递增，避免 InnoDB 随机 IO 页分裂
 ```
 
 UUID v4 作为唯一索引在写入量大时会导致频繁的 **页分裂** 和 **B+树节点重平衡**。趋势递增的复合 Token 将写入转化为顺序追加。
@@ -326,10 +326,10 @@ return {0, balance - tonumber(ARGV[1])}
 
 ```redis
 INCR combo:{room_id}:{user_id}:{gift_id}
-EXPIRE combo:{room_id}:{user_id}:{gift_id} 3
+EXPIRE combo:{room_id}:{user_id}:{gift_id} 600
 ```
 
-- TTL=3s 即连击窗口。连续送礼 → combo 递增，超过 3s 不送 → key 过期归零
+- TTL=600s 即连击窗口。连续送礼 → combo 递增，超过 10 分钟不送 → key 过期归零
 - 全服务共享 Redis，WS 网关可直读 combo 数广播房间
 
 ### 5.4 排行榜
@@ -420,7 +420,7 @@ Queues:
 ### 6.2 幂等防线
 
 ```text
-接入层: Redis SETNX (5s TTL) 防重复提交
+接入层: Redis SETNX (600s TTL) 防重复提交
     │
     ▼
 持久层: batch_token UNIQUE KEY (终极兜底)
@@ -460,13 +460,16 @@ db.SetMaxIdleConns(20)
 | MQ 不可用 | Publish 超时 3s → 返回成功（best effort） | 少量事件丢失，可通过补偿机制恢复 |
 | 版本冲突高 | 重试 3 次 → 放弃本批 | 进入下个 100ms 窗口重试 |
 
-### 7.2 优雅关闭
+### 7.2 优雅关闭（TODO）
+
+当前未实现。计划方案：
 
 ```text
-1. http.Server.Shutdown  — 停止接受新请求
-2. Settle consumer 停止  — 等待最后一个 flush 完成
-3. MQ 连接关闭            — 确保已确认消息
-4. DB 连接池关闭
+1. signal.Notify 捕获 SIGTERM/SIGINT
+2. http.Server.Shutdown  — 停止接受新请求
+3. Settle consumer 停止  — flush 最后一批
+4. MQ 连接关闭            — 确保已确认消息
+5. DB 连接池关闭
 ```
 
 ---
@@ -494,6 +497,7 @@ db.SetMaxIdleConns(20)
 | 402 | 2001 | 余额不足 |
 | 404 | 2002 | 礼物不存在或已下架 |
 | 409 | 3001 | 幂等冲突（重复请求） |
+| 500 | 9001 | 服务内部错误 |
 | 503 | 9002 | 服务过载，稍后重试 |
 
 ---

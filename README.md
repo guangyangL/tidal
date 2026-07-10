@@ -1,9 +1,9 @@
-# Tidal · 高并发直播打赏引擎
+# Tidal · 高并发直播打赏服务
 
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-**Tidal（潮汐）** 是一个高并发直播连击打赏与结算引擎，专为直播 PK/赛事等流量洪峰场景设计。
+**Tidal（潮汐）** 是一个高并发直播打赏服务，专为直播 PK/赛事等流量洪峰场景设计。
 
 > 请求路径只做快操作，慢操作全部异步。
 > Redis Lua 预扣 → MQ 异步落盘 → MySQL CAS 结算

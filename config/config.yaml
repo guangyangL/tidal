@@ -17,7 +17,6 @@ rabbitmq:
   url: "amqp://guest:guest@127.0.0.1:5672/"
   exchange: "tidal.settle"
   queue: "tidal.settle.queue"
-  routing_key: "tidal.settle.routing"
   dead_letter_queue: "tidal.settle.dead"
 
 aggregator:
