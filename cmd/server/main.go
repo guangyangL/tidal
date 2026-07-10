@@ -85,7 +85,7 @@ func main() {
 		if err != nil {
 			log.Printf("leaderboard channel: %v", err)
 		} else {
-			lbConsumer, err := leaderboard.StartConsumer(lbCh, rdb, segTree)
+			lbConsumer, err := leaderboard.StartConsumer(lbCh, rdb, segTree, treeConf.TopK)
 			if err != nil {
 				log.Printf("leaderboard mq consumer: %v", err)
 			}

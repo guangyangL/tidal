@@ -22,23 +22,18 @@ func NewCounter(rdb *redis.Client, producer *mq.Producer) *Counter {
 
 // AddScore atomically increments a user's score and publishes a change event.
 // Called by GiftService after PreDeduct succeeds.
+// ZSet update is deferred to the MQ consumer to reduce hot-path Redis ops.
 func (c *Counter) AddScore(ctx context.Context, roomID string, userID int64, delta int) error {
-	key := fmt.Sprintf("room:leaderboard:%s", roomID)
-	// Store individual score for coarse rank queries
-	c.rdb.IncrBy(ctx, fmt.Sprintf("counter:%s:%d", roomID, userID), int64(delta))
-
-	// Step 1: ZINCRBY
-	newScore, err := c.rdb.ZIncrBy(ctx, key, float64(delta), fmt.Sprintf("%d", userID)).Result()
+	newTotal, err := c.rdb.IncrBy(ctx, fmt.Sprintf("counter:%s:%d", roomID, userID), int64(delta)).Result()
 	if err != nil {
-		return fmt.Errorf("zincrby: %w", err)
+		return fmt.Errorf("incrby: %w", err)
 	}
 
-	// Step 2: Publish change event to MQ
 	event := event.ChangeCounterTriggerEvent{
 		KeyPrefix:  roomID,
 		UserID:     userID,
 		DeltaScore: delta,
-		Score:      int(newScore),
+		Score:      int(newTotal),
 	}
 	body, err := json.Marshal(event)
 	if err != nil {
