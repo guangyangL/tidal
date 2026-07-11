@@ -16,14 +16,13 @@ POST /api/v1/gift/send
   ├─ 礼物价格  (Redis HGET, cache miss 回 MySQL)
   ├─ 钱包预扣  (Redis Lua 原子 DECRBY)
   ├─ 连击计数  (Redis INCR + EXPIRE, 600s)
-  ├─ 排行榜    (ZSet ZINCRBY + MQ 线段树)
+  ├─ 排行榜    (INCRBY + MQ 线段树/ZSet)
   └─ MQ 投递   (gift.settle 异步落盘)
 
 MQ Consumer (100ms batch)
   ├─ 分组聚合  (按 user/room/anchor/gift hash)
-  ├─ MySQL CAS (乐观锁扣减, retry 3 次)
-  ├─ SyncBalance (Lua 只降不升, 防止超卖)
-  └─ INSERT 流水 (batch_token 唯一键幂等)
+  ├─ MySQL 事务 (CAS 扣减 + INSERT 流水, retry 3 次)
+  └─ SyncBalance (Lua 只降不升, 防止超卖)
 ```
 
 ## 压测数据
@@ -110,8 +109,8 @@ scripts/             # 压测脚本 + DDL
 - **幂等**: `X-Request-ID` → Redis SETNX + `batch_token` UNIQUE KEY 双重保障
 - **预扣**: Redis Lua 原子 `{GET, CHECK, DECRBY, EXPIRE}`，杜绝超卖
 - **一致**: SyncBalance Lua 脚本保证 Redis 永不高估余额
-- **落盘**: 100ms 批量聚合 + MySQL CAS 乐观锁 (retry 3)
-- **排行**: ZSet 精确 TopN + 线段树粗估排名
+- **落盘**: 100ms 批量聚合 + MySQL 事务写入 (CAS + 流水, retry 3)
+- **排行**: ZSet 精确 TopN + 线段树粗估排名 + 定期剪枝防大 key
 
 ## License
 
