@@ -16,7 +16,14 @@ type Config struct {
 	Redis      RedisConfig      `mapstructure:"redis"`
 	RabbitMQ   RabbitMQConfig   `mapstructure:"rabbitmq"`
 	Aggregator AggregatorConfig `mapstructure:"aggregator"`
+	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
 	Log        LogConfig        `mapstructure:"log"`
+}
+
+type RateLimitConfig struct {
+	Enabled  bool    `mapstructure:"enabled"`
+	Rate     float64 `mapstructure:"rate"`
+	Capacity int     `mapstructure:"capacity"`
 }
 
 type ServerConfig struct {
@@ -101,5 +108,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("aggregator.shutdown_flush_timeout", "10s")
 	v.SetDefault("aggregator.max_combo_count", 100)
 	v.SetDefault("aggregator.max_windows_per_shard", 100000)
+	v.SetDefault("rate_limit.enabled", true)
+	v.SetDefault("rate_limit.rate", 10.0)
+	v.SetDefault("rate_limit.capacity", 20)
 	v.SetDefault("log.level", "info")
 }

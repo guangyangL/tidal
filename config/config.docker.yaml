@@ -26,5 +26,10 @@ aggregator:
   max_combo_count: 100
   max_windows_per_shard: 100000
 
+rate_limit:
+  enabled: true
+  rate: 10      # tokens per second
+  capacity: 20  # max burst
+
 log:
   level: "info"

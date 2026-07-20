@@ -53,6 +53,12 @@ func main() {
 	giftCache := cache.NewGiftCache(rdb, giftRepo)
 	walletCache := cache.NewWalletCache(rdb, walletRepo)
 
+	// --- rate limiter ---
+	var rateLimiter *middleware.RateLimiter
+	if cfg.RateLimit.Enabled {
+		rateLimiter = middleware.NewRateLimiter(cfg.RateLimit.Rate, float64(cfg.RateLimit.Capacity))
+	}
+
 	// --- MQ ---
 	var (
 		mqProducer *mq.Producer
@@ -115,6 +121,7 @@ func main() {
 	// --- router ---
 	r := gin.Default()
 	r.Use(middleware.Auth())
+	r.Use(middleware.GinMiddleware(rateLimiter))
 
 	api := r.Group("/api/v1")
 	{
